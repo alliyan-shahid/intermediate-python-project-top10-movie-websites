@@ -130,7 +130,7 @@ def edit(id):
         db.session.commit()
         return redirect(url_for("home"))
 
-    return render_template("edit.html", form=form, id=id)
+    return render_template("edit.html", form=form, id=id, movie=movie)
 
 
 @app.route("/delete/<int:id>")
