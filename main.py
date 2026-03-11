@@ -1,4 +1,3 @@
-# Movie Rating Website - Flask web application
 from flask import Flask, render_template, redirect, url_for, request
 from flask_bootstrap import Bootstrap5
 from flask_sqlalchemy import SQLAlchemy
@@ -8,17 +7,25 @@ from flask_wtf import FlaskForm
 from wtforms import StringField, SubmitField
 from wtforms.validators import DataRequired
 import requests
+import os
 
-# API configuration - replace with your own TMDB API key
-MOVIE_DB_API_KEY = "USE_YOUR_OWN_CODE"
-MOVIE_DB_SEARCH_URL = "https://api.themoviedb.org/3/search/movie"
-MOVIE_DB_INFO_URL = "https://api.themoviedb.org/3/movie"
-MOVIE_DB_IMAGE_URL = "https://image.tmdb.org/t/p/w500"
+# API Configuration - Replace with your own credentials
+API_KEY = os.environ.get("TMDB_API_KEY", "your_api_key_here")
+BEARER_TOKEN = os.environ.get("TMDB_BEARER_TOKEN", "your_bearer_token_here")
 
-# Create Flask app
+search_url = "https://api.themoviedb.org/3/search/movie"
+info_url = "https://api.themoviedb.org/3/movie"
+img_url = "https://image.tmdb.org/t/p/w500"
+
+headers = {
+    "Authorization": f"Bearer {BEARER_TOKEN}",
+    "accept": "application/json"
+}
+
 app = Flask(__name__)
-app.config['SECRET_KEY'] = '8BYkEfBA6O6donzWlSihBXox7C0sKR6b'  # Secret key for forms
-Bootstrap5(app)  # Add Bootstrap styling
+# Use environment variable for secret key in production
+app.config['SECRET_KEY'] = os.environ.get("FLASK_SECRET_KEY", "dev-key-change-in-production")
+Bootstrap5(app)
 
 
 # Database setup
@@ -31,7 +38,7 @@ db = SQLAlchemy(model_class=Base)
 db.init_app(app)
 
 
-# Movie table definition
+# Movie table schema
 class Movie(db.Model):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     title: Mapped[str] = mapped_column(String(250), unique=True, nullable=False)
@@ -43,113 +50,96 @@ class Movie(db.Model):
     img_url: Mapped[str] = mapped_column(String(250), nullable=False)
 
 
-# Create database tables
 with app.app_context():
     db.create_all()
 
 
-# Form for searching movies
-class FindMovieForm(FlaskForm):
+class RateMovieForm(FlaskForm):
+    rating = StringField("Your Rating Out of 10 e.g. 7.5", validators=[DataRequired()])
+    review = StringField("Your Review", validators=[DataRequired()])
+    submit = SubmitField("Done")
+
+
+class AddMovieForm(FlaskForm):
     title = StringField("Movie Title", validators=[DataRequired()])
     submit = SubmitField("Add Movie")
 
 
-# Form for rating movies
-class RateMovieForm(FlaskForm):
-    rating = StringField("Your Rating Out of 10 e.g. 7.5")
-    review = StringField("Your Review")
-    submit = SubmitField("Done")
-
-
-# Home page - shows all movies sorted by rating
 @app.route("/")
 def home():
-    # Get all movies sorted by rating (highest first)
-    result = db.session.execute(db.select(Movie).order_by(Movie.rating))
+    # Grab all movies from the database
+    result = db.session.execute(db.select(Movie))
     all_movies = result.scalars().all()
-
-    # Assign rankings (1 = highest rated)
-    for i in range(len(all_movies)):
-        all_movies[i].ranking = len(all_movies) - i
+    
+    # Filter out movies without ratings and sort by rating
+    movies_with_ratings = [movie for movie in all_movies if movie.rating is not None]
+    movies_with_ratings.sort(key=lambda x: x.rating, reverse=True)
+    
+    # Assign rankings
+    for index, movie in enumerate(movies_with_ratings):
+        movie.ranking = index + 1
+    
     db.session.commit()
+    
+    # Display movies in ranking order
+    final_result = db.session.execute(db.select(Movie).order_by(Movie.ranking))
+    final_movies = final_result.scalars().all()
+    
+    return render_template("index.html", movies=final_movies)
 
-    return render_template("index.html", movies=all_movies)
 
-
-# Add movie page - search for movies
 @app.route("/add", methods=["GET", "POST"])
-def add_movie():
-    form = FindMovieForm()
-
+def add():
+    form = AddMovieForm()
     if form.validate_on_submit():
-        # Search TMDB API for movies
-        movie_title = form.title.data
-        response = requests.get(MOVIE_DB_SEARCH_URL, params={
-            "api_key": MOVIE_DB_API_KEY,
-            "query": movie_title
-        })
-        data = response.json()["results"]
-        return render_template("select.html", options=data)
-
+        params = {"query": form.title.data}
+        movie_data = requests.get(search_url, headers=headers, params=params).json()["results"]
+        return render_template("select.html", options=movie_data)
     return render_template("add.html", form=form)
 
 
-# Find movie details and add to database
 @app.route("/find")
 def find_movie():
-    movie_api_id = request.args.get("id")
-
-    if movie_api_id:
-        # Get movie details from TMDB
-        movie_api_url = f"{MOVIE_DB_INFO_URL}/{movie_api_id}"
-        response = requests.get(movie_api_url, params={
-            "api_key": MOVIE_DB_API_KEY,
-            "language": "en-US"
-        })
+    movie_id = request.args.get("id")
+    if movie_id:
+        response = requests.get(
+            f"{info_url}/{movie_id}",
+            params={"api_key": API_KEY, "language": "hi-IN"}
+        )
         data = response.json()
 
-        # Create new movie in database
         new_movie = Movie(
             title=data["title"],
-            year=data["release_date"].split("-")[0],  # Extract year
-            img_url=f"{MOVIE_DB_IMAGE_URL}{data['poster_path']}",
+            year=data["release_date"].split("-")[0],
+            img_url=f"{img_url}{data['poster_path']}",
             description=data["overview"]
         )
-
         db.session.add(new_movie)
         db.session.commit()
-
-        # Go to rating page for this movie
-        return redirect(url_for("rate_movie", id=new_movie.id))
+        return redirect(url_for("edit", id=new_movie.id))
 
 
-# Rate and review movie
-@app.route("/edit", methods=["GET", "POST"])
-def rate_movie():
+@app.route("/edit/<int:id>", methods=["GET", "POST"])
+def edit(id):
     form = RateMovieForm()
-    movie_id = request.args.get("id")
-    movie = db.get_or_404(Movie, movie_id)
+    movie = db.get_or_404(Movie, id)
 
-    if form.validate_on_submit():
-        # Update movie with user rating and review
-        movie.rating = float(form.rating.data)
+    if request.method == "POST":
+        movie.rating = form.rating.data
         movie.review = form.review.data
         db.session.commit()
-        return redirect(url_for('home'))
+        return redirect(url_for("home"))
 
-    return render_template("edit.html", movie=movie, form=form)
+    return render_template("edit.html", form=form, id=id)
 
 
-# Delete movie from database
-@app.route("/delete")
-def delete_movie():
-    movie_id = request.args.get("id")
-    movie = db.get_or_404(Movie, movie_id)
+@app.route("/delete/<int:id>")
+def delete(id):
+    movie = db.get_or_404(Movie, id)
     db.session.delete(movie)
     db.session.commit()
     return redirect(url_for("home"))
 
 
-# Run the app
 if __name__ == '__main__':
     app.run(debug=True)
